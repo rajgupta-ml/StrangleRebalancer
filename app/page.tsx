@@ -42,6 +42,7 @@ type ResultsState = {
     rawDelta: string
   }
   netDelta: string
+  inRangeProfitEstimated: string
 } | null
 
 // Black-Scholes Greeks calculation (Unchanged from your code)
@@ -113,6 +114,23 @@ const findStrikeForDelta = (
   }
 
   return (low + high) / 2
+}
+
+// Black-Scholes price for European options
+const priceOption = (S: number, K: number, T: number, r: number, sigma: number, optionType: OptionType): number => {
+  const { d1, d2 } = calculateGreeks(S, K, T, r, sigma, optionType)
+  // standard normal CDF reused from calculateGreeks via d1/d2 mapping
+  const normalCDF = (x: number): number => {
+    const t = 1 / (1 + 0.2316419 * Math.abs(x))
+    const d = 0.3989423 * Math.exp((-x * x) / 2)
+    const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))))
+    return x > 0 ? 1 - prob : prob
+  }
+  if (optionType === "call") {
+    return S * normalCDF(d1) - K * Math.exp(-r * T) * normalCDF(d2)
+  } else {
+    return K * Math.exp(-r * T) * normalCDF(-d2) - S * normalCDF(-d1)
+  }
 }
 
 // *** NEW: Renamed and refactored component ***
@@ -205,6 +223,13 @@ const StrangleRebalancer: React.FC = () => {
       newLegPositionDelta = -newLegPositionDelta
     }
 
+    // Estimate net premium (credit positive) if you enter now, per unit
+    const existingPremium = priceOption(S, existingLeg.strike, T, r, sigma, existingLeg.type)
+    const newLegPremium = priceOption(S, optimalStrike, T, r, sigma, legToFind.type)
+    const signedExistingPremium = (existingLeg.position === "short" ? +existingPremium : -existingPremium) * existingLeg.quantity
+    const signedNewPremium = (legToFind.position === "short" ? +newLegPremium : -newLegPremium) * newQty
+    const netPremium = signedExistingPremium + signedNewPremium
+
     setResults({
       existingLeg: {
         ...existingLeg,
@@ -219,6 +244,7 @@ const StrangleRebalancer: React.FC = () => {
         rawDelta: newLegGreeks.delta.toFixed(4),
       },
       netDelta: (existingPositionDelta + newLegPositionDelta).toFixed(4),
+      inRangeProfitEstimated: netPremium.toFixed(2),
     })
   }
 
@@ -391,7 +417,7 @@ const StrangleRebalancer: React.FC = () => {
             <h2 className="text-2xl font-bold text-foreground mb-8">Calculation Results</h2>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-              <div className="bg-gradient-to-br from-red-50 to-red-100 rounded-lg p-6 border border-red-200">
+              <div className="bg-linear-to-br from-red-50 to-red-100 rounded-lg p-6 border border-red-200">
                 <div className="text-sm font-medium text-red-600 mb-2">Existing Leg Delta</div>
                 <div className="text-3xl font-bold text-red-700 mb-1">{results.existingLeg.positionDelta}</div>
                 <div className="text-xs text-red-600 opacity-75">
@@ -400,7 +426,7 @@ const StrangleRebalancer: React.FC = () => {
                 </div>
               </div>
 
-              <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-6 border border-green-200">
+              <div className="bg-linear-to-br from-green-50 to-green-100 rounded-lg p-6 border border-green-200">
                 <div className="text-sm font-medium text-green-600 mb-2">New Leg Delta</div>
                 <div className="text-3xl font-bold text-green-700 mb-1">{results.newLeg.positionDelta}</div>
                 <div className="text-xs text-green-600 opacity-75">
@@ -409,14 +435,24 @@ const StrangleRebalancer: React.FC = () => {
                 </div>
               </div>
 
-              <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-6 border border-blue-200">
+              <div className="bg-linear-to-br from-blue-50 to-blue-100 rounded-lg p-6 border border-blue-200">
                 <div className="text-sm font-medium text-blue-600 mb-2">Combined Net Delta</div>
                 <div className="text-3xl font-bold text-blue-700 mb-1">{results.netDelta}</div>
                 <div className="text-xs text-blue-600 opacity-75">Target: ≈ 0 (Delta Neutral)</div>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-lg p-8 text-white mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+              <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
+                <div className="text-sm font-medium text-blue-700 mb-2">Estimated Profit if Expiry Between Strikes</div>
+                <div className="text-3xl font-bold text-blue-800">₹ {results.inRangeProfitEstimated}</div>
+                <div className="text-xs text-blue-700 opacity-75 mt-1">
+                  Approximated as net premium (credit positive), per unit; ignores fees and carry.
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-linear-to-r from-blue-600 to-blue-700 rounded-lg p-8 text-white mb-8">
               <h3 className="text-lg font-semibold mb-4">📌 Recommended Trade</h3>
               <div className="space-y-2">
                 <div className="flex items-baseline gap-2">
