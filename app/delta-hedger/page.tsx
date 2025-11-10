@@ -1,0 +1,428 @@
+"use client"
+import type React from "react"
+import { useState } from "react"
+import { Zap, GitMerge } from "lucide-react"
+type OptionType = "call" | "put"
+type PositionType = "short" | "long"
+
+type Greeks = {
+  delta: number
+  d1: number
+  d2: number
+}
+
+type ExistingLegState = {
+  type: OptionType
+  strike: number
+  quantity: number
+  position: PositionType
+}
+
+type LegToFindState = {
+  type: OptionType
+  position: PositionType
+}
+
+type MarketDataState = {
+  spotPrice: number
+  daysToExpiry: number
+  volatility: number // percent
+  riskFreeRate: number // percent
+}
+
+type ResultsState = {
+  existingLeg: ExistingLegState & {
+    positionDelta: string
+    rawDelta: string
+  }
+  newLeg: LegToFindState & {
+    strike: number
+    quantity: number
+    positionDelta: string
+    rawDelta: string
+  }
+  netDelta: string
+  inRangeProfitEstimated: string
+} | null
+
+const calculateGreeks = (S: number, K: number, T: number, r: number, sigma: number, optionType: OptionType): Greeks => {
+  if (T <= 0) T = 0.001
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * Math.sqrt(T))
+  const d2 = d1 - sigma * Math.sqrt(T)
+
+  const normalCDF = (x: number): number => {
+    const t = 1 / (1 + 0.2316419 * Math.abs(x))
+    const d = 0.3989423 * Math.exp((-x * x) / 2)
+    const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))))
+    return x > 0 ? 1 - prob : prob
+  }
+
+  let delta
+  if (optionType === "call") {
+    delta = normalCDF(d1)
+  } else {
+    delta = normalCDF(d1) - 1
+  }
+
+  return { delta, d1, d2 }
+}
+
+const findStrikeForDelta = (
+  S: number,
+  targetDelta: number,
+  T: number,
+  r: number,
+  sigma: number,
+  optionType: OptionType,
+  minStrike: number,
+  maxStrike: number,
+): number => {
+  const tolerance = 0.001
+  let low = minStrike
+  let high = maxStrike
+  let iterations = 0
+  const maxIterations = 100
+
+  while (iterations < maxIterations && high - low > 0.5) {
+    const mid = (low + high) / 2
+    const greeks = calculateGreeks(S, mid, T, r, sigma, optionType)
+    const delta = Math.abs(greeks.delta)
+    const target = Math.abs(targetDelta)
+    if (Math.abs(delta - target) < tolerance) {
+      return mid
+    }
+    if (delta > target) {
+      if (optionType === "call") {
+        low = mid
+      } else {
+        high = mid
+      }
+    } else {
+      if (optionType === "call") {
+        high = mid
+      } else {
+        low = mid
+      }
+    }
+    iterations++
+  }
+  return (low + high) / 2
+}
+
+const priceOption = (S: number, K: number, T: number, r: number, sigma: number, optionType: OptionType): number => {
+  const { d1, d2 } = calculateGreeks(S, K, T, r, sigma, optionType)
+  const normalCDF = (x: number): number => {
+    const t = 1 / (1 + 0.2316419 * Math.abs(x))
+    const d = 0.3989423 * Math.exp((-x * x) / 2)
+    const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))))
+    return x > 0 ? 1 - prob : prob
+  }
+  if (optionType === "call") {
+    return S * normalCDF(d1) - K * Math.exp(-r * T) * normalCDF(d2)
+  } else {
+    return K * Math.exp(-r * T) * normalCDF(-d2) - S * normalCDF(-d1)
+  }
+}
+
+const DeltaHedgerPage: React.FC = () => {
+  const [existingLeg, setExistingLeg] = useState<ExistingLegState>({
+    type: "call",
+    strike: 850,
+    quantity: 1,
+    position: "short",
+  })
+  const [legToFind, setLegToFind] = useState<LegToFindState>({
+    type: "put",
+    position: "short",
+  })
+  const [marketData, setMarketData] = useState<MarketDataState>({
+    spotPrice: 828,
+    daysToExpiry: 18,
+    volatility: 20,
+    riskFreeRate: 6.5,
+  })
+  // Auto-calc Days to Expiry from a chosen expiry date
+  const toInputDate = (d: Date) => d.toISOString().slice(0, 10)
+  const addDays = (d: Date, n: number) => {
+    const nd = new Date(d)
+    nd.setDate(nd.getDate() + n)
+    return nd
+  }
+  const today = new Date()
+  const [expiryDate, setExpiryDate] = useState<string>(toInputDate(addDays(today, marketData.daysToExpiry)))
+  const calcDaysFromDate = (dateStr: string) => {
+    const start = new Date(new Date().toDateString())
+    const end = new Date(dateStr + "T00:00:00")
+    const ms = end.getTime() - start.getTime()
+    return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)))
+  }
+  const [results, setResults] = useState<ResultsState>(null)
+
+  const findBalancingLeg = (): void => {
+    const S = marketData.spotPrice
+    const T = marketData.daysToExpiry / 365
+    const sigma = marketData.volatility / 100
+    const r = marketData.riskFreeRate / 100
+    const existingGreeks = calculateGreeks(S, existingLeg.strike, T, r, sigma, existingLeg.type)
+    const rawExistingDelta = existingGreeks.delta
+    let existingPositionDelta = rawExistingDelta * existingLeg.quantity
+    if (existingLeg.position === "short") {
+      existingPositionDelta = -existingPositionDelta
+    }
+    const targetNewPositionDelta = -existingPositionDelta
+    const newQty = existingLeg.quantity
+    let targetRawDelta
+    if (legToFind.position === "short") {
+      targetRawDelta = -targetNewPositionDelta / newQty
+    } else {
+      targetRawDelta = targetNewPositionDelta / newQty
+    }
+    const optimalStrike = findStrikeForDelta(S, targetRawDelta, T, r, sigma, legToFind.type, S * 0.7, S * 1.5)
+    const newLegGreeks = calculateGreeks(S, optimalStrike, T, r, sigma, legToFind.type)
+    let newLegPositionDelta = newLegGreeks.delta * newQty
+    if (legToFind.position === "short") {
+      newLegPositionDelta = -newLegPositionDelta
+    }
+    const existingPremium = priceOption(S, existingLeg.strike, T, r, sigma, existingLeg.type)
+    const newLegPremium = priceOption(S, optimalStrike, T, r, sigma, legToFind.type)
+    const signedExistingPremium = (existingLeg.position === "short" ? +existingPremium : -existingPremium) * existingLeg.quantity
+    const signedNewPremium = (legToFind.position === "short" ? +newLegPremium : -newLegPremium) * newQty
+    const netPremium = signedExistingPremium + signedNewPremium
+    setResults({
+      existingLeg: {
+        ...existingLeg,
+        positionDelta: existingPositionDelta.toFixed(4),
+        rawDelta: rawExistingDelta.toFixed(4),
+      },
+      newLeg: {
+        ...legToFind,
+        strike: Math.round(optimalStrike),
+        quantity: newQty,
+        positionDelta: newLegPositionDelta.toFixed(4),
+        rawDelta: newLegGreeks.delta.toFixed(4),
+      },
+      netDelta: (existingPositionDelta + newLegPositionDelta).toFixed(4),
+      inRangeProfitEstimated: netPremium.toFixed(2),
+    })
+  }
+
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="max-w-7xl mx-auto px-4 py-8 md:py-12">
+        <div className="mb-12">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="p-2 bg-blue-100 rounded-lg">
+              <GitMerge className="w-6 h-6 text-blue-600" />
+            </div>
+            <h1 className="text-4xl font-bold text-foreground">Strangle Rebalancer</h1>
+          </div>
+          <p className="text-muted-foreground text-lg">Find the optimal balancing leg for delta-neutral options trading</p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+          <div className="lg:col-span-1 bg-card rounded-xl border border-border p-6 shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-center gap-2 mb-5">
+              <h2 className="text-lg font-semibold text-foreground">Existing Leg</h2>
+              <span className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded">Your Current Position</span>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Position Type</label>
+                <select
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={existingLeg.position}
+                  onChange={(e) => setExistingLeg({ ...existingLeg, position: e.target.value as PositionType })}
+                >
+                  <option value="short">Short</option>
+                  <option value="long">Long</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Option Type</label>
+                <select
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={existingLeg.type}
+                  onChange={(e) => setExistingLeg({ ...existingLeg, type: e.target.value as OptionType })}
+                >
+                  <option value="call">Call</option>
+                  <option value="put">Put</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Strike Price (₹)</label>
+                <input
+                  type="number"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={existingLeg.strike}
+                  onChange={(e) => setExistingLeg({ ...existingLeg, strike: Number.parseFloat(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Quantity (Lots)</label>
+                <input
+                  type="number"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={existingLeg.quantity}
+                  onChange={(e) => setExistingLeg({ ...existingLeg, quantity: Number.parseInt(e.target.value) })}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-1 bg-card rounded-xl border border-border p-6 shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-center gap-2 mb-5">
+              <h2 className="text-lg font-semibold text-foreground">Balancing Leg</h2>
+              <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">Find This</span>
+            </div>
+            <p className="text-sm text-muted-foreground mb-4">Configure the new leg to calculate optimal strike for delta neutrality.</p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Position Type</label>
+                <select
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={legToFind.position}
+                  onChange={(e) => setLegToFind({ ...legToFind, position: e.target.value as PositionType })}
+                >
+                  <option value="short">Short</option>
+                  <option value="long">Long</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Option Type</label>
+                <select
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={legToFind.type}
+                  onChange={(e) => setLegToFind({ ...legToFind, type: e.target.value as OptionType })}
+                >
+                  <option value="put">Put</option>
+                  <option value="call">Call</option>
+                </select>
+              </div>
+              <div className="pt-8 flex items-center justify-center text-center">
+                <div>
+                  <div className="text-3xl font-bold text-muted-foreground mb-2">?</div>
+                  <p className="text-xs text-muted-foreground">Strike price will be calculated</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-1 bg-card rounded-xl border border-border p-6 shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-center gap-2 mb-5">
+              <h2 className="text-lg font-semibold text-foreground">Market Data</h2>
+              <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">Inputs</span>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Expiry Date</label>
+                <input
+                  type="date"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={expiryDate}
+                  min={toInputDate(today)}
+                  onChange={(e) => {
+                    const d = e.target.value
+                    setExpiryDate(d)
+                    const days = calcDaysFromDate(d)
+                    setMarketData((m) => ({ ...m, daysToExpiry: days }))
+                  }}
+                />
+                <div className="text-xs text-muted-foreground mt-1">Days auto-calculated from selected date.</div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Spot Price (₹)</label>
+                <input
+                  type="number"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={marketData.spotPrice}
+                  onChange={(e) => setMarketData({ ...marketData, spotPrice: Number.parseFloat(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Days to Expiry</label>
+                <input
+                  type="number"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={marketData.daysToExpiry}
+                  onChange={(e) => {
+                    const days = Number.parseInt(e.target.value)
+                    setMarketData({ ...marketData, daysToExpiry: days })
+                    setExpiryDate(toInputDate(addDays(today, days)))
+                  }}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Volatility (%)</label>
+                <input
+                  type="number"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={marketData.volatility}
+                  onChange={(e) => setMarketData({ ...marketData, volatility: Number.parseFloat(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Risk-Free Rate (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={marketData.riskFreeRate}
+                  onChange={(e) => setMarketData({ ...marketData, riskFreeRate: Number.parseFloat(e.target.value) })}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={findBalancingLeg}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 shadow-md hover:shadow-lg mb-8"
+        >
+          <Zap className="w-5 h-5" />
+          Calculate Balancing Leg
+        </button>
+
+        {results && (
+          <div className="bg-card rounded-xl border border-border p-8 shadow-sm">
+            <h2 className="text-2xl font-bold text-foreground mb-8">Calculation Results</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+              <div className="bg-linear-to-br from-red-50 to-red-100 rounded-lg p-6 border border-red-200">
+                <div className="text-sm font-medium text-red-600 mb-2">Existing Leg Delta</div>
+                <div className="text-3xl font-bold text-red-700 mb-1">{results.existingLeg.positionDelta}</div>
+                <div className="text-xs text-red-600 opacity-75">
+                  {results.existingLeg.quantity}x {results.existingLeg.position} {results.existingLeg.type.toUpperCase()} @ ₹
+                  {results.existingLeg.strike}
+                </div>
+              </div>
+              <div className="bg-linear-to-br from-green-50 to-green-100 rounded-lg p-6 border border-green-200">
+                <div className="text-sm font-medium text-green-600 mb-2">New Leg Delta</div>
+                <div className="text-3xl font-bold text-green-700 mb-1">{results.newLeg.positionDelta}</div>
+                <div className="text-xs text-green-600 opacity-75">
+                  {results.newLeg.quantity}x {results.newLeg.position} {results.newLeg.type.toUpperCase()} @ ₹
+                  {results.newLeg.strike}
+                </div>
+              </div>
+              <div className="bg-linear-to-br from-blue-50 to-blue-100 rounded-lg p-6 border border-blue-200">
+                <div className="text-sm font-medium text-blue-600 mb-2">Combined Net Delta</div>
+                <div className="text-3xl font-bold text-blue-700 mb-1">{results.netDelta}</div>
+                <div className="text-xs text-blue-600 opacity-75">Target: ≈ 0 (Delta Neutral)</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+              <div className="bg-blue-50 rounded-lg p-6 border border-blue-200">
+                <div className="text-sm font-medium text-blue-700 mb-2">Estimated Profit if Expiry Between Strikes</div>
+                <div className="text-3xl font-bold text-blue-800">₹ {results.inRangeProfitEstimated}</div>
+                <div className="text-xs text-blue-700 opacity-75 mt-1">
+                  Approximated as net premium (credit positive), per unit; ignores fees and carry.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default DeltaHedgerPage
+

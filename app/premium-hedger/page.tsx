@@ -83,6 +83,21 @@ const PremiumHedgerPage: React.FC = () => {
     volatility: 20,
     riskFreeRate: 6.5,
   })
+  // Auto-calc Days to Expiry from a chosen expiry date
+  const toInputDate = (d: Date) => d.toISOString().slice(0, 10)
+  const addDays = (d: Date, n: number) => {
+    const nd = new Date(d)
+    nd.setDate(nd.getDate() + n)
+    return nd
+  }
+  const today = new Date()
+  const [expiryDate, setExpiryDate] = useState<string>(toInputDate(addDays(today, marketData.daysToExpiry)))
+  const calcDaysFromDate = (dateStr: string) => {
+    const start = new Date(new Date().toDateString())
+    const end = new Date(dateStr + "T00:00:00")
+    const ms = end.getTime() - start.getTime()
+    return Math.max(0, Math.ceil(ms / (1000 * 60 * 60 * 24)))
+  }
   const [inputLegType, setInputLegType] = useState<OptionType>("put")
   const [inputStrike, setInputStrike] = useState<number>(770)
   const [inputLtp, setInputLtp] = useState<number>(6.5)
@@ -135,6 +150,22 @@ const PremiumHedgerPage: React.FC = () => {
             <h2 className="text-lg font-semibold text-foreground mb-4">Market Data</h2>
             <div className="space-y-4">
               <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Expiry Date</label>
+                <input
+                  type="date"
+                  className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                  value={expiryDate}
+                  min={toInputDate(today)}
+                  onChange={(e) => {
+                    const d = e.target.value
+                    setExpiryDate(d)
+                    const days = calcDaysFromDate(d)
+                    setMarketData((m) => ({ ...m, daysToExpiry: days }))
+                  }}
+                />
+                <div className="text-xs text-muted-foreground mt-1">Days auto-calculated from selected date.</div>
+              </div>
+              <div>
                 <label className="block text-sm font-medium text-foreground mb-2">Spot Price (₹)</label>
                 <input
                   type="number"
@@ -149,7 +180,11 @@ const PremiumHedgerPage: React.FC = () => {
                   type="number"
                   className="w-full px-3 py-2 bg-background border border-border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
                   value={marketData.daysToExpiry}
-                  onChange={(e) => setMarketData({ ...marketData, daysToExpiry: Number.parseInt(e.target.value) })}
+                  onChange={(e) => {
+                    const days = Number.parseInt(e.target.value)
+                    setMarketData({ ...marketData, daysToExpiry: days })
+                    setExpiryDate(toInputDate(addDays(today, days)))
+                  }}
                 />
               </div>
               <div>
